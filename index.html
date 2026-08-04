@@ -2,34 +2,40 @@
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
-    <!-- 針對手機螢幕進行視窗最佳化，禁止使用者縮放 -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>手機版 OpenCV.js 距離偵測</title>
+    <!-- 針對手機螢幕進行視窗最佳化，禁止使用者隨意縮放 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>手機 OpenCV.js 距離偵測</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align: center; background: #121212; color: #fff; margin: 0; padding: 10px; }
-        h1 { font-size: 1.5rem; margin: 10px 0; }
-        .canvas-container { position: relative; width: 100%; max-width: 480px; margin: 0 auto; }
-        video { display: none; } 
-        /* 手機直式滿版或等比例縮放 */
-        canvas { width: 100%; height: auto; border: 2px solid #00ffcc; border-radius: 12px; background: #000; }
-        #status { font-size: 1rem; color: #ffcc00; margin: 10px 0; padding: 5px; background: rgba(255,255,255,0.1); border-radius: 5px; }
-        .btn { background: #00ffcc; color: #000; border: none; padding: 10px 20px; font-size: 1rem; font-weight: bold; border-radius: 20px; margin: 10px; cursor: pointer; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align: center; background: #121212; color: #fff; margin: 0; padding: 15px; }
+        h1 { font-size: 1.3rem; margin: 10px 0 5px 0; color: #00ffcc; }
+        .canvas-container { position: relative; width: 100%; max-width: 400px; margin: 10px auto; }
+        video { display: none; } /* 隱藏原生視訊 */
+        canvas { width: 100%; height: auto; border: 2px solid #00ffcc; border-radius: 12px; background: #000; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        #status { font-size: 0.9rem; color: #ffcc00; margin: 5px 0; padding: 8px; background: rgba(255,255,255,0.08); border-radius: 6px; word-break: break-all; }
+        .btn { background: #00ffcc; color: #121212; border: none; padding: 12px 24px; font-size: 1rem; font-weight: bold; border-radius: 25px; margin-top: 5px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,255,204,0.3); -webkit-tap-highlight-color: transparent; }
+        .btn:active { background: #00ccaa; }
+        .hint { font-size: 0.85rem; color: #aaa; margin-top: 10px; line-height: 1.4; }
     </style>
 </head>
 <body>
 
     <h1>手機距離偵測 (OpenCV.js)</h1>
-    <div id="status">正在載入 WebAssembly 核心...</div>
+    <div id="status">正在下載 WebAssembly 核心...</div>
 
     <div class="canvas-container">
-        <video id="videoInput" autoplay playsinline></video>
+        <video id="videoInput" autoplay playsinline webkit-playsinline muted></video>
         <canvas id="canvasOutput"></canvas>
     </div>
 
     <button class="btn" id="switchBtn">切換鏡頭</button>
 
-    <!-- 引入官方輕量化或標準 OpenCV.js -->
-    <script async src="https://opencv.org" type="text/javascript"></script>
+    <div class="hint">
+        💡 提示：請張開手掌面對鏡頭。<br>
+        若畫面全黑，請確認已在 HTTPS 環境下並允許相機權限。
+    </div>
+
+    <!-- 關鍵優化：引入手機相容性最高、體積小的單執行緒 OpenCV.js 版本 -->
+    <script src="https://jsdelivr.net" type="text/javascript"></script>
 
     <script>
         const video = document.getElementById('videoInput');
@@ -39,15 +45,17 @@
         const switchBtn = document.getElementById('switchBtn');
 
         let currentStream = null;
-        let useFacingMode = "user"; // "user" 代表前鏡頭，"environment" 代表後鏡頭
+        let useFacingMode = "user"; // "user" 前鏡頭，"environment" 後鏡頭
         let isCvReady = false;
 
-        const KNOWN_DISTANCE = 40.0; 
-        const KNOWN_WIDTH = 10.0;    
-        let focalLength = 400;       // 手機鏡頭焦距基底通常較小
+        // 基準常數設定（可依據需求微調）
+        const KNOWN_DISTANCE = 40.0; // 公分 (基準距離)
+        const KNOWN_WIDTH = 10.0;    // 公分 (手掌平均實際寬度)
+        let focalLength = 450;       // 相機焦距估算值
 
+        // OpenCV.js 成功初始化回呼
         window.onRuntimeInitialized = () => {
-            statusText.innerText = "OpenCV 載入成功！請允許鏡頭權限...";
+            statusText.innerText = "核心載入成功！正在請求鏡頭權限...";
             isCvReady = true;
             startCamera();
         };
@@ -58,12 +66,12 @@
                 currentStream.getTracks().forEach(track => track.stop());
             }
 
-            // 設定適合手機流暢運行的解析度 (不需太高，320x240 或 640x480 最流暢)
+            // 設定適合手機流暢運行的輕量解析度
             const constraints = {
                 video: {
                     facingMode: useFacingMode,
-                    width: { ideal: 640 },
-                    height: { ideal: 480 }
+                    width: { ideal: 480 },
+                    height: { ideal: 640 }
                 },
                 audio: false
             };
@@ -72,108 +80,131 @@
                 .then((stream) => {
                     currentStream = stream;
                     video.srcObject = stream;
-                    video.play();
+                    video.play().catch(e => {
+                        statusText.innerText = "播放視訊失敗，請點擊螢幕重試";
+                    });
                 })
                 .catch((err) => {
-                    statusText.innerText = "無法開啟鏡頭，請檢查權限設定。";
+                    statusText.innerText = "無法開啟鏡頭，請檢查是否使用了 HTTPS 網址或已被權限封鎖。";
                     console.error(err);
                 });
         }
 
-        // 當影片成功播放，動態調整 Canvas 解析度並啟動運算
+        // 核心修正：防範手機瀏覽器非同步加載導致的 0x0 黑色畫面 Bug
         video.addEventListener('playing', () => {
+            if (video.videoWidth === 0 || video.videoHeight === 0) {
+                setTimeout(() => {
+                    video.dispatchEvent(new Event('playing'));
+                }, 150);
+                return;
+            }
+
+            // 動態同步畫布與視訊的真實硬體解析度
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
-            focalLength = (canvas.width * 0.2) * KNOWN_DISTANCE / KNOWN_WIDTH; 
+            
+            // 動態估算焦距基底
+            focalLength = (canvas.width * 0.25) * KNOWN_DISTANCE / KNOWN_WIDTH; 
             statusText.innerText = "系統運作中...";
             
-            // 防止重複觸發循環
-            if(window.processingLoop === undefined) {
+            if (window.processingLoop === undefined) {
                 window.processingLoop = true;
                 processVideo();
             }
         });
 
-        // 切換前後鏡頭按鈕
+        // 切換前後鏡頭
         switchBtn.addEventListener('click', () => {
             useFacingMode = (useFacingMode === "user") ? "environment" : "user";
+            statusText.innerText = "正在切換鏡頭...";
             startCamera();
         });
 
         function processVideo() {
-            // 在外面初始化記憶體，避免在迴圈內反覆建立導致手機記憶體崩潰
+            // 全域宣告矩陣，避免在無限迴圈內反覆建立，防止手機記憶體洩漏與發燙
             let src = new cv.Mat(canvas.height, canvas.width, cv.CV_8UC4);
             let hsv = new cv.Mat();
             let mask = new cv.Mat();
             let contours = new cv.MatVector();
             let hierarchy = new cv.Mat();
-            let M = cv.Mat.ones(5, 5, cv.CV_8U);
+            
+            // 結構元素：用於形態學濾除雜訊
+            let ksize = new cv.Size(5, 5);
+            let M = cv.getStructuringElement(cv.MORPH_RECT, ksize);
 
-            const FPS = 24; // 手機版設 24 FPS 既順暢又省電
+            const FPS = 20; // 手機板設定 20 FPS，保持順暢同時大幅省電
 
             function nextFrame() {
                 if (!isCvReady) return;
                 
                 try {
+                    // 將當前視訊影格繪製到畫布暫存，再讀取給 OpenCV 處理
                     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
                     let imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
                     src.data.set(imageData.data);
 
-                    // 如果是前鏡頭，水平翻轉畫面讓操作更直覺
+                    // 如果是前鏡頭，將畫面水平翻轉（鏡像處理），符合人類直覺
                     if (useFacingMode === "user") {
                         cv.flip(src, src, 1);
                     }
 
-                    // HSV 膚色過濾
+                    // 色彩空間轉換：RGBA -> RGB -> HSV
                     cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
                     cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
 
-                    // 針對多數手機鏡頭調校的 HSV 膚色範圍
-                    let low = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [0, 30, 60, 0]);
-                    let high = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [20, 150, 255, 255]);
+                    // 手機端最優化膚色 HSV 範圍設定
+                    let low = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [0, 25, 40, 0]);
+                    let high = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [25, 160, 255, 255]);
                     cv.inRange(hsv, low, high, mask);
                     low.delete(); high.delete();
 
-                    // 去除雜訊
-                    cv.erode(mask, mask, M);
-                    cv.dilate(mask, mask, M);
+                    // 形態學運算：先侵蝕後膨脹（開運算），去除背景微小雜訊與毛邊
+                    cv.morphologyEx(mask, mask, cv.MORPH_OPEN, M);
+                    // 填補手掌內部的空隙
+                    cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, M);
 
-                    // 輪廓分析
+                    // 尋找膚色輪廓
                     cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
 
                     let maxArea = 0;
                     let maxContourIndex = -1;
 
+                    // 篩選出最大面積的輪廓（排除雜訊）
                     for (let i = 0; i < contours.size(); ++i) {
                         let area = cv.contourArea(contours.get(i));
-                        if (area > maxArea && area > 2000) { 
+                        if (area > maxArea && area > 2500) { 
                             maxArea = area;
                             maxContourIndex = i;
                         }
                     }
 
+                    // 若成功捕捉到手部
                     if (maxContourIndex !== -1) {
                         let rect = cv.boundingRect(contours.get(maxContourIndex));
                         
-                        // 繪製標籤
-                        let point1 = new cv.Point(rect.x, rect.y);
-                        let point2 = new cv.Point(rect.x + rect.width, rect.y + rect.height);
-                        cv.rectangle(src, point1, point2, [0, 255, 204, 255], 3);
+                        // 畫出綠色外接矩形
+                        let p1 = new cv.Point(rect.x, rect.y);
+                        let p2 = new cv.Point(rect.x + rect.width, rect.y + rect.height);
+                        cv.rectangle(src, p1, p2, [0, 255, 204, 255], 3);
 
-                        // 計算距離
+                        // 相似三角形公式計算距離
                         let distance = (KNOWN_WIDTH * focalLength) / rect.width;
                         let text = `Dist: ${Math.round(distance)} cm`;
 
-                        cv.putText(src, text, new cv.Point(rect.x, rect.y - 15), 
-                                   cv.FONT_HERSHEY_SIMPLEX, 1.0, [0, 255, 204, 255], 3);
+                        // 在畫面上即時繪製距離文字
+                        cv.putText(src, text, new cv.Point(rect.x, rect.y - 12), 
+                                   cv.FONT_HERSHEY_SIMPLEX, 0.9, [0, 255, 204, 255], 2);
                     }
 
+                    // 將最終處理完的矩陣渲染回手機螢幕
                     cv.imshow('canvasOutput', src);
 
                 } catch (err) {
-                    console.log("影格跳過: ", err);
+                    // 偶爾跳過損壞的影格，防止網頁當掉
+                    console.log("Frame Skip: ", err);
                 }
 
+                // 循環調用
                 setTimeout(nextFrame, 1000 / FPS);
             }
 
