@@ -3,8 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>AI 手部 AI 距離偵測 (MediaPipe)</title>
-    <!-- 引入 MediaPipe Hands 與 Camera 工具 -->
+    <title>AI 手部距離偵測 (帶校正功能)</title>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
     <style>
@@ -14,14 +13,16 @@
         video { display: none; }
         canvas { width: 100%; height: auto; border: 2px solid #00ffcc; border-radius: 12px; background: #000; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
         #status { font-size: 0.9rem; color: #ffcc00; margin: 5px 0; padding: 8px; background: rgba(255,255,255,0.08); border-radius: 6px; }
-        .btn { background: #00ffcc; color: #121212; border: none; padding: 12px 24px; font-size: 1rem; font-weight: bold; border-radius: 25px; margin-top: 5px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,255,204,0.3); -webkit-tap-highlight-color: transparent; }
-        .btn:active { background: #00ccaa; }
+        .btn-group { display: flex; justify-content: center; gap: 10px; margin-top: 10px; }
+        .btn { background: #00ffcc; color: #121212; border: none; padding: 12px 20px; font-size: 0.95rem; font-weight: bold; border-radius: 25px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,255,204,0.3); -webkit-tap-highlight-color: transparent; }
+        .btn-calibrate { background: #ffcc00; box-shadow: 0 2px 8px rgba(255,204,0,0.3); }
+        .btn:active { opacity: 0.8; }
         .hint { font-size: 0.85rem; color: #aaa; margin-top: 10px; line-height: 1.4; }
     </style>
 </head>
 <body>
 
-    <h1>AI 手部距離偵測 (MediaPipe)</h1>
+    <h1>AI 手部距離偵測</h1>
     <div id="status">正在初始化 AI 模型...</div>
 
     <div class="canvas-container">
@@ -29,11 +30,13 @@
         <canvas id="canvasOutput"></canvas>
     </div>
 
-    <button class="btn" id="switchBtn">切換鏡頭</button>
+    <div class="btn-group">
+        <button class="btn btn-calibrate" id="calibrateBtn">🎯 30cm 快速校正</button>
+        <button class="btn" id="switchBtn">切換鏡頭</button>
+    </div>
 
     <div class="hint">
-        💡 提示：面向鏡頭伸出手掌。<br>
-        AI 會自動鎖定手掌關節點進行精準測距。
+        💡 **校正教學**：將手掌放在距離鏡頭 **30 公分** 處，點擊「30cm 快速校正」即可完成鏡頭精準校正。
     </div>
 
     <script>
@@ -42,17 +45,19 @@
         const ctx = canvas.getContext('2d');
         const statusText = document.getElementById('status');
         const switchBtn = document.getElementById('switchBtn');
+        const calibrateBtn = document.getElementById('calibrateBtn');
 
         let useFacingMode = "user";
         let cameraHelper = null;
-        let smoothDistance = 0; // 平滑濾波用
+        let smoothDistance = 0;
+        let currentPixelDist = 0; // 紀錄當前手掌像素大小
 
-        // 基準參數設定
-        const KNOWN_DISTANCE = 40.0; // 40 cm
-        const KNOWN_PALM_WIDTH = 7.5; // 食指根部到小指根部的平均物理距離 (cm)
-        let focalLength = 500;        // 相機預估焦距
+        // 預設參數
+        const KNOWN_PALM_WIDTH = 7.5; // 食指根部到小指根部 (cm)
+        let focalLength = localStorage.getItem('calibratedFocalLength') 
+            ? parseFloat(localStorage.getItem('calibratedFocalLength')) 
+            : 550; // 若有校正紀錄則優先讀取
 
-        // 初始化 MediaPipe Hands
         const hands = new Hands({
             locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
         });
@@ -67,38 +72,30 @@
         hands.onResults(onResults);
 
         function startCamera() {
-            if (cameraHelper) {
-                cameraHelper.stop();
-            }
-
+            if (cameraHelper) cameraHelper.stop();
             statusText.innerText = "正在開啟鏡頭...";
 
             cameraHelper = new Camera(video, {
-                onFrame: async () => {
-                    await hands.send({ image: video });
-                },
+                onFrame: async () => { await hands.send({ image: video }); },
                 facingMode: useFacingMode,
-                width: 2160,
-                height: 3840
+                width: 720,
+                height: 1280
             });
 
             cameraHelper.start().then(() => {
-                statusText.innerText = "AI 系統準備完成，請伸出手掌";
+                statusText.innerText = "系統運作中，請將手掌面對鏡頭";
             }).catch(err => {
-                statusText.innerText = "無法存取鏡頭，請確認是否允許存取權限。";
-                console.error(err);
+                statusText.innerText = "無法開啟鏡頭，請確認存取權限。";
             });
         }
 
         function onResults(results) {
-            // 同步 Canvas 解析度
             canvas.width = video.videoWidth || 720;
             canvas.height = video.videoHeight || 1280;
 
             ctx.save();
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            // 繪製原始畫面 (若是前鏡頭，進行鏡像翻轉處理)
             if (useFacingMode === "user") {
                 ctx.translate(canvas.width, 0);
                 ctx.scale(-1, 1);
@@ -108,38 +105,31 @@
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                 const landmarks = results.multiHandLandmarks[0];
 
-                // 取得關節 5 (Index MCP) 與關節 17 (Pinky MCP)
-                const p5 = landmarks[5];
-                const p17 = landmarks[17];
+                const p5 = landmarks[5];   // 食指根部
+                const p17 = landmarks[17]; // 小指根部
 
-                // 轉為畫素座標
                 const x1 = p5.x * canvas.width;
                 const y1 = p5.y * canvas.height;
                 const x2 = p17.x * canvas.width;
                 const y2 = p17.y * canvas.height;
 
-                // 計算兩點間的歐幾里得像素距離
-                const pixelDist = Math.hypot(x2 - x1, y2 - y1);
+                // 即時像素距離
+                currentPixelDist = Math.hypot(x2 - x1, y2 - y1);
 
-                // 動態校正焦距基底
-                focalLength = (canvas.width * 0.22) * KNOWN_DISTANCE / KNOWN_PALM_WIDTH;
+                // 計算物理距離
+                const rawDistance = (KNOWN_PALM_WIDTH * focalLength) / currentPixelDist;
 
-                // 計算物理距離 (cm)
-                const rawDistance = (KNOWN_PALM_WIDTH * focalLength) / pixelDist;
-
-                // 指數平滑濾波 (Low-pass filter)，消除數字微小跳動
+                // 平滑濾波
                 if (smoothDistance === 0) smoothDistance = rawDistance;
-                smoothDistance = smoothDistance * 0.75 + rawDistance * 0.25;
+                smoothDistance = smoothDistance * 0.7 + rawDistance * 0.3;
 
-                // 繪製關節連線與測量線
+                // 畫出測量線與骨骼點
                 ctx.strokeStyle = '#00ffcc';
                 ctx.lineWidth = 4;
                 ctx.beginPath();
-                ctx.moveTo(x1, y1);
-                ctx.lineTo(x2, y2);
+                ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
                 ctx.stroke();
 
-                // 繪製所有 21 個關節點
                 for (let lm of landmarks) {
                     ctx.fillStyle = '#ff0055';
                     ctx.beginPath();
@@ -147,36 +137,46 @@
                     ctx.fill();
                 }
 
-                // 翻轉繪圖環境以正確顯示文字 (避免鏡像文字顛倒)
                 if (useFacingMode === "user") {
                     ctx.translate(canvas.width, 0);
                     ctx.scale(-1, 1);
                 }
 
-                // 顯示距離數值
-                const displayText = `${Math.round(smoothDistance)} cm`;
+                const textX = (useFacingMode === "user") ? (canvas.width - x1) : x1;
                 ctx.fillStyle = '#00ffcc';
                 ctx.font = 'bold 28px sans-serif';
-                
-                // 定位在手掌上方
-                const textX = (useFacingMode === "user") ? (canvas.width - x1) : x1;
-                ctx.fillText(displayText, textX, Math.max(y1 - 20, 40));
+                ctx.fillText(`${Math.round(smoothDistance)} cm`, textX, Math.max(y1 - 20, 40));
 
-                statusText.innerText = `成功捕捉手部！目前距離：${Math.round(smoothDistance)} cm`;
+                statusText.innerText = `距離：${Math.round(smoothDistance)} cm`;
             } else {
-                statusText.innerText = "搜尋手掌中...";
+                currentPixelDist = 0;
                 smoothDistance = 0;
+                statusText.innerText = "搜尋手掌中...";
             }
 
             ctx.restore();
         }
+
+        // 30cm 校正按鈕邏輯
+        calibrateBtn.addEventListener('click', () => {
+            if (currentPixelDist > 0) {
+                // 自動反推此鏡頭焦距參數 (以 30cm 為基準)
+                focalLength = (currentPixelDist * 30.0) / KNOWN_PALM_WIDTH;
+                
+                // 儲存在手機瀏覽器快取中，下次打開不用重新校正
+                localStorage.setItem('calibratedFocalLength', focalLength);
+                
+                alert(`校正成功！焦距參數已設定為：${Math.round(focalLength)}`);
+            } else {
+                alert("未偵測到手掌，請先將手掌面對鏡頭！");
+            }
+        });
 
         switchBtn.addEventListener('click', () => {
             useFacingMode = (useFacingMode === "user") ? "environment" : "user";
             startCamera();
         });
 
-        // 啟動鏡頭
         startCamera();
     </script>
 </body>
