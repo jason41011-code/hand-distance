@@ -3,15 +3,16 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>AI 手部距離偵測 (多機型相容版)</title>
+    <title>AI 手部距離偵測 (HyperOS 最佳化版)</title>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align: center; background: #121212; color: #fff; margin: 0; padding: 15px; }
         h1 { font-size: 1.3rem; margin: 10px 0 5px 0; color: #00ffcc; }
-        .canvas-container { position: relative; width: 100%; max-width: 480px; margin: 10px auto; }
-        video { display: none; }
-        canvas { width: 100%; height: auto; border: 2px solid #00ffcc; border-radius: 12px; background: #000; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        .canvas-container { position: relative; width: 100%; max-width: 480px; margin: 10px auto; background: #000; border-radius: 12px; overflow: hidden; border: 2px solid #00ffcc; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        
+        video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0.01; pointer-events: none; z-index: 1; }
+        canvas { position: relative; width: 100%; height: auto; display: block; z-index: 2; }
         
         #status { font-size: 0.95rem; font-weight: bold; color: #ffcc00; margin: 5px 0; padding: 10px; background: rgba(255,204,0,0.15); border: 1px solid #ffcc00; border-radius: 8px; word-break: break-all; }
         #status.ready { color: #00ffcc; background: rgba(0,255,204,0.1); border-color: #00ffcc; }
@@ -33,10 +34,10 @@
 <body>
 
     <h1>AI 手部距離偵測</h1>
-    <div id="status">⚠️ 請先進行校正：將手固定放置於 15 公分處</div>
+    <div id="status">⏳ 正在啟動引擎...</div>
 
     <div class="canvas-container">
-        <video id="videoInput" playsinline muted></video>
+        <video id="videoInput" playsinline muted webkit-playsinline></video>
         <canvas id="canvasOutput"></canvas>
     </div>
 
@@ -46,7 +47,7 @@
     </div>
 
     <div class="hint" id="hintText">
-        💡 <b>校正指南</b>：將手掌固定在距離鏡頭 <b>15 公分</b> 處，看到紅點後按下「確認 15cm 校正」。
+        💡 <b>校正指南</b>：請退後至 25~30cm 處將手掌放入框內，看到紅點後按下「確認 15cm 校正」。
     </div>
 
     <script>
@@ -58,9 +59,10 @@
         const calibrateBtn = document.getElementById('calibrateBtn');
         const hintText = document.getElementById('hintText');
 
+        let currentStream = null;
         let useFacingMode = "user";
-        let cameraHelper = null;
-        
+        let isProcessing = false;
+
         let isCalibrated = false;
         const CALIBRATE_TARGET_CM = 15.0;
         const KNOWN_PALM_WIDTH = 7.5;
@@ -69,49 +71,69 @@
         let currentPixelDist = 0;
         let smoothDistance = 0;
 
-        // 檢查 WebGL 支援
-        function isWebGLAvailable() {
-            try {
-                const canvas = document.createElement('canvas');
-                return !!(window.WebGLRenderingContext && (canvas.getContext('webgl') || canvas.getContext('experimental-webgl')));
-            } catch (e) {
-                return false;
-            }
-        }
-
-        if (!isWebGLAvailable()) {
-            statusText.innerText = "❌ 您的瀏覽器不支援 WebGL，請改用 Chrome 或 Safari 開啟！";
-        }
+        // 離屏 Canvas：專門防禦 HyperOS GPU 像素變形 Bug
+        const processCanvas = document.createElement('canvas');
+        const processCtx = processCanvas.getContext('2d');
 
         const hands = new Hands({
             locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
         });
 
-        // 調整相容性設定：降低門檻至 0.5，提升低畫質鏡頭抓取率
+        // 核心設定修復：針對 HyperOS 將門檻調至 0.4，改用輕量 AI 模型
         hands.setOptions({
             maxNumHands: 1,
-            modelComplexity: 0, // 改為 0 (Lite 模型)，大幅降低硬體需求並提高偵測成功率
-            minDetectionConfidence: 0.5,
-            minTrackingConfidence: 0.5
+            modelComplexity: 0,
+            minDetectionConfidence: 0.4,
+            minTrackingConfidence: 0.4
         });
 
         hands.onResults(onResults);
 
-        function startCamera() {
-            if (cameraHelper) cameraHelper.stop();
+        async function startCamera() {
+            if (currentStream) {
+                currentStream.getTracks().forEach(track => track.stop());
+            }
 
-            // 彈性硬體設定：使用 ideal 避開固定解析度導致死鎖問題
-            cameraHelper = new Camera(video, {
-                onFrame: async () => { await hands.send({ image: video }); },
-                facingMode: useFacingMode,
-                width: { ideal: 640 },
-                height: { ideal: 480 }
-            });
+            statusText.innerText = "正在開啟鏡頭...";
 
-            cameraHelper.start().catch(err => {
-                statusText.innerText = "❌ 無法開啟鏡頭，請確認權限或嘗試改用外置 Chrome 開啟。";
-                console.error(err);
-            });
+            try {
+                const constraints = {
+                    video: {
+                        facingMode: useFacingMode,
+                        width: { ideal: 640 },
+                        height: { ideal: 480 }
+                    },
+                    audio: false
+                };
+
+                currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+                video.srcObject = currentStream;
+                await video.play();
+
+                statusText.innerText = isCalibrated ? "🟢 實時測距中" : "⚠️ 請將手放置於 25~30cm 保持清晰對焦";
+                requestAnimationFrame(processFrame);
+
+            } catch (err) {
+                statusText.innerText = "❌ 無法存取鏡頭，請確認權限設定。";
+            }
+        }
+
+        async function processFrame() {
+            if (video.readyState >= 2 && video.videoWidth > 0 && !isProcessing) {
+                isProcessing = true;
+                try {
+                    // 標準化離屏圖像輸入，防止 HyperOS Chrome GPU 將非標準解析度計算歸零
+                    processCanvas.width = 480;
+                    processCanvas.height = 360;
+                    processCtx.drawImage(video, 0, 0, 480, 360);
+
+                    await hands.send({ image: processCanvas });
+                } catch (e) {
+                    console.error("Frame Process Error: ", e);
+                }
+                isProcessing = false;
+            }
+            requestAnimationFrame(processFrame);
         }
 
         function onResults(results) {
@@ -125,13 +147,14 @@
                 ctx.translate(canvas.width, 0);
                 ctx.scale(-1, 1);
             }
+            
             ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
 
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                 const landmarks = results.multiHandLandmarks[0];
 
-                const p5 = landmarks[5];
-                const p17 = landmarks[17];
+                const p5 = landmarks[5];   
+                const p17 = landmarks[17]; 
 
                 const x1 = p5.x * canvas.width;
                 const y1 = p5.y * canvas.height;
@@ -163,7 +186,7 @@
                 if (!isCalibrated) {
                     ctx.fillStyle = '#ffcc00';
                     ctx.font = 'bold 24px sans-serif';
-                    ctx.fillText("請維持 15cm 並按校正", textX, Math.max(y1 - 20, 40));
+                    ctx.fillText("請維持距離並按校正", textX, Math.max(y1 - 20, 40));
                 } else {
                     const rawDistance = (KNOWN_PALM_WIDTH * focalLength) / currentPixelDist;
 
@@ -181,7 +204,7 @@
                 currentPixelDist = 0;
                 smoothDistance = 0;
                 if (!isCalibrated) {
-                    statusText.innerText = "⚠️ 搜尋手掌中...請保持手掌面向鏡頭";
+                    statusText.innerText = "⚠️ 搜尋手掌中...請保持手掌完整在框內";
                 } else {
                     statusText.innerText = "🔍 搜尋手掌中...";
                 }
@@ -202,7 +225,7 @@
                 calibrateBtn.style.animation = "none";
                 calibrateBtn.innerText = "🔄 重新校正 (15cm)";
 
-                hintText.innerHTML = "💡 <b>測距進行中</b>：可隨意移動手掌。若換人使用可重新校正。";
+                hintText.innerHTML = "💡 <b>測距進行中</b>：可隨意移動手掌。";
 
             } else {
                 alert("未偵測到手掌！請確定畫面上看到手部紅點後再按確認。");
