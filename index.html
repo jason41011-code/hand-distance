@@ -3,14 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>手機 OpenCV.js 距離偵測</title>
+    <title>AI 手部 AI 距離偵測 (MediaPipe)</title>
+    <!-- 引入 MediaPipe Hands 與 Camera 工具 -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align: center; background: #121212; color: #fff; margin: 0; padding: 15px; }
         h1 { font-size: 1.3rem; margin: 10px 0 5px 0; color: #00ffcc; }
-        .canvas-container { position: relative; width: 100%; max-width: 400px; margin: 10px auto; }
+        .canvas-container { position: relative; width: 100%; max-width: 480px; margin: 10px auto; }
         video { display: none; }
         canvas { width: 100%; height: auto; border: 2px solid #00ffcc; border-radius: 12px; background: #000; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
-        #status { font-size: 0.9rem; color: #ffcc00; margin: 5px 0; padding: 8px; background: rgba(255,255,255,0.08); border-radius: 6px; word-break: break-all; }
+        #status { font-size: 0.9rem; color: #ffcc00; margin: 5px 0; padding: 8px; background: rgba(255,255,255,0.08); border-radius: 6px; }
         .btn { background: #00ffcc; color: #121212; border: none; padding: 12px 24px; font-size: 1rem; font-weight: bold; border-radius: 25px; margin-top: 5px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,255,204,0.3); -webkit-tap-highlight-color: transparent; }
         .btn:active { background: #00ccaa; }
         .hint { font-size: 0.85rem; color: #aaa; margin-top: 10px; line-height: 1.4; }
@@ -18,23 +21,20 @@
 </head>
 <body>
 
-    <h1>手機距離偵測 (OpenCV.js)</h1>
-    <div id="status">正在下載 WebAssembly 核心...</div>
+    <h1>AI 手部距離偵測 (MediaPipe)</h1>
+    <div id="status">正在初始化 AI 模型...</div>
 
     <div class="canvas-container">
-        <video id="videoInput" autoplay playsinline webkit-playsinline muted></video>
+        <video id="videoInput" playsinline muted></video>
         <canvas id="canvasOutput"></canvas>
     </div>
 
     <button class="btn" id="switchBtn">切換鏡頭</button>
 
     <div class="hint">
-        💡 提示：請張開手掌面對鏡頭。<br>
-        若畫面全黑，請確認已在 HTTPS 環境下並允許相機權限。
+        💡 提示：面向鏡頭伸出手掌。<br>
+        AI 會自動鎖定手掌關節點進行精準測距。
     </div>
-
-    <!-- 修正：引進完整的 OpenCV.js CDN -->
-    <script async src="https://docs.opencv.org/4.9.0/opencv.js" type="text/javascript"></script>
 
     <script>
         const video = document.getElementById('videoInput');
@@ -43,162 +43,141 @@
         const statusText = document.getElementById('status');
         const switchBtn = document.getElementById('switchBtn');
 
-        let currentStream = null;
         let useFacingMode = "user";
-        let isCvReady = false;
+        let cameraHelper = null;
+        let smoothDistance = 0; // 平滑濾波用
 
-        const KNOWN_DISTANCE = 40.0; // 基準距離 (cm)
-        const KNOWN_WIDTH = 10.0;    // 手掌估算寬度 (cm)
-        let focalLength = 450;       // 相機焦距估算值
+        // 基準參數設定
+        const KNOWN_DISTANCE = 40.0; // 40 cm
+        const KNOWN_PALM_WIDTH = 7.5; // 食指根部到小指根部的平均物理距離 (cm)
+        let focalLength = 500;        // 相機預估焦距
 
-        window.onOpenCvReady = () => {
-            statusText.innerText = "核心載入成功！正在請求鏡頭權限...";
-            isCvReady = true;
-            startCamera();
-        };
+        // 初始化 MediaPipe Hands
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
 
-        // 相容性處理：確認 OpenCV 載入完成
-        if (typeof cv !== 'undefined' && cv.Mat) {
-            window.onOpenCvReady();
-        } else {
-            Module = {
-                onRuntimeInitialized: window.onOpenCvReady
-            };
-        }
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 1,
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
+        });
+
+        hands.onResults(onResults);
 
         function startCamera() {
-            if (currentStream) {
-                currentStream.getTracks().forEach(track => track.stop());
+            if (cameraHelper) {
+                cameraHelper.stop();
             }
 
-            const constraints = {
-                video: {
-                    facingMode: useFacingMode,
-                    width: { ideal: 1080},
-                    height: { ideal: 1920 }
-                },
-                audio: false
-            };
+            statusText.innerText = "正在開啟鏡頭...";
 
-            navigator.mediaDevices.getUserMedia(constraints)
-                .then((stream) => {
-                    currentStream = stream;
-                    video.srcObject = stream;
-                    video.play().catch(e => {
-                        statusText.innerText = "播放視訊失敗，請點擊螢幕重試";
-                    });
-                })
-                .catch((err) => {
-                    statusText.innerText = "無法開啟鏡頭，請檢查是否使用了 HTTPS 網址或已被權限封鎖。";
-                    console.error(err);
-                });
+            cameraHelper = new Camera(video, {
+                onFrame: async () => {
+                    await hands.send({ image: video });
+                },
+                facingMode: useFacingMode,
+                width: 2160,
+                height: 3840
+            });
+
+            cameraHelper.start().then(() => {
+                statusText.innerText = "AI 系統準備完成，請伸出手掌";
+            }).catch(err => {
+                statusText.innerText = "無法存取鏡頭，請確認是否允許存取權限。";
+                console.error(err);
+            });
         }
 
-        video.addEventListener('playing', () => {
-            if (video.videoWidth === 0 || video.videoHeight === 0) {
-                setTimeout(() => {
-                    video.dispatchEvent(new Event('playing'));
-                }, 150);
-                return;
+        function onResults(results) {
+            // 同步 Canvas 解析度
+            canvas.width = video.videoWidth || 720;
+            canvas.height = video.videoHeight || 1280;
+
+            ctx.save();
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 繪製原始畫面 (若是前鏡頭，進行鏡像翻轉處理)
+            if (useFacingMode === "user") {
+                ctx.translate(canvas.width, 0);
+                ctx.scale(-1, 1);
+            }
+            ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+
+                // 取得關節 5 (Index MCP) 與關節 17 (Pinky MCP)
+                const p5 = landmarks[5];
+                const p17 = landmarks[17];
+
+                // 轉為畫素座標
+                const x1 = p5.x * canvas.width;
+                const y1 = p5.y * canvas.height;
+                const x2 = p17.x * canvas.width;
+                const y2 = p17.y * canvas.height;
+
+                // 計算兩點間的歐幾里得像素距離
+                const pixelDist = Math.hypot(x2 - x1, y2 - y1);
+
+                // 動態校正焦距基底
+                focalLength = (canvas.width * 0.22) * KNOWN_DISTANCE / KNOWN_PALM_WIDTH;
+
+                // 計算物理距離 (cm)
+                const rawDistance = (KNOWN_PALM_WIDTH * focalLength) / pixelDist;
+
+                // 指數平滑濾波 (Low-pass filter)，消除數字微小跳動
+                if (smoothDistance === 0) smoothDistance = rawDistance;
+                smoothDistance = smoothDistance * 0.75 + rawDistance * 0.25;
+
+                // 繪製關節連線與測量線
+                ctx.strokeStyle = '#00ffcc';
+                ctx.lineWidth = 4;
+                ctx.beginPath();
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+                ctx.stroke();
+
+                // 繪製所有 21 個關節點
+                for (let lm of landmarks) {
+                    ctx.fillStyle = '#ff0055';
+                    ctx.beginPath();
+                    ctx.arc(lm.x * canvas.width, lm.y * canvas.height, 4, 0, 2 * Math.PI);
+                    ctx.fill();
+                }
+
+                // 翻轉繪圖環境以正確顯示文字 (避免鏡像文字顛倒)
+                if (useFacingMode === "user") {
+                    ctx.translate(canvas.width, 0);
+                    ctx.scale(-1, 1);
+                }
+
+                // 顯示距離數值
+                const displayText = `${Math.round(smoothDistance)} cm`;
+                ctx.fillStyle = '#00ffcc';
+                ctx.font = 'bold 28px sans-serif';
+                
+                // 定位在手掌上方
+                const textX = (useFacingMode === "user") ? (canvas.width - x1) : x1;
+                ctx.fillText(displayText, textX, Math.max(y1 - 20, 40));
+
+                statusText.innerText = `成功捕捉手部！目前距離：${Math.round(smoothDistance)} cm`;
+            } else {
+                statusText.innerText = "搜尋手掌中...";
+                smoothDistance = 0;
             }
 
-            canvas.width = video.videoWidth;
-            canvas.height = video.videoHeight;
-            
-            focalLength = (canvas.width * 0.25) * KNOWN_DISTANCE / KNOWN_WIDTH; 
-            statusText.innerText = "系統運作中...";
-            
-            if (window.processingLoop === undefined) {
-                window.processingLoop = true;
-                processVideo();
-            }
-        });
+            ctx.restore();
+        }
 
         switchBtn.addEventListener('click', () => {
             useFacingMode = (useFacingMode === "user") ? "environment" : "user";
-            statusText.innerText = "正在切換鏡頭...";
             startCamera();
         });
 
-        function processVideo() {
-            let src = new cv.Mat(canvas.height, canvas.width, cv.CV_8UC4);
-            let hsv = new cv.Mat();
-            let mask = new cv.Mat();
-            let contours = new cv.MatVector();
-            let hierarchy = new cv.Mat();
-            
-            let ksize = new cv.Size(5, 5);
-            let M = cv.getStructuringElement(cv.MORPH_RECT, ksize);
-
-            const FPS = 20;
-
-            function nextFrame() {
-                if (!isCvReady) return;
-                
-                try {
-                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                    let imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                    src.data.set(imageData.data);
-
-                    if (useFacingMode === "user") {
-                        cv.flip(src, src, 1);
-                    }
-
-                    cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
-                    cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
-
-                    let low = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [0, 25, 40, 0]);
-                    let high = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [25, 160, 255, 255]);
-                    cv.inRange(hsv, low, high, mask);
-                    low.delete(); 
-                    high.delete();
-
-                    cv.morphologyEx(mask, mask, cv.MORPH_OPEN, M);
-                    cv.morphologyEx(mask, mask, cv.MORPH_CLOSE, M);
-
-                    cv.findContours(mask, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
-
-                    let maxArea = 0;
-                    let maxContourIndex = -1;
-
-                    // 修正：手動釋放 contours.get(i) 的 WASM 記憶體
-                    for (let i = 0; i < contours.size(); ++i) {
-                        let cnt = contours.get(i);
-                        let area = cv.contourArea(cnt);
-                        if (area > maxArea && area > 2500) { 
-                            maxArea = area;
-                            maxContourIndex = i;
-                        }
-                        cnt.delete(); // 防止記憶體洩漏
-                    }
-
-                    if (maxContourIndex !== -1) {
-                        let targetCnt = contours.get(maxContourIndex);
-                        let rect = cv.boundingRect(targetCnt);
-                        targetCnt.delete(); // 釋放記憶體
-
-                        let p1 = new cv.Point(rect.x, rect.y);
-                        let p2 = new cv.Point(rect.x + rect.width, rect.y + rect.height);
-                        cv.rectangle(src, p1, p2, [0, 255, 204, 255], 3);
-
-                        let distance = (KNOWN_WIDTH * focalLength) / rect.width;
-                        let text = `Dist: ${Math.round(distance)} cm`;
-
-                        let textPos = new cv.Point(rect.x, rect.y - 12);
-                        cv.putText(src, text, textPos, cv.FONT_HERSHEY_SIMPLEX, 0.9, [0, 255, 204, 255], 2);
-                    }
-
-                    cv.imshow('canvasOutput', src);
-
-                } catch (err) {
-                    console.log("Frame Skip: ", err);
-                }
-
-                setTimeout(nextFrame, 1000 / FPS);
-            }
-
-            setTimeout(nextFrame, 1000 / FPS);
-        }
+        // 啟動鏡頭
+        startCamera();
     </script>
 </body>
 </html>
