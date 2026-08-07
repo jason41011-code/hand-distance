@@ -3,19 +3,18 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>AI 手部距離偵測 (雙層硬體加速版)</title>
-    <!-- 引入官方穩定 MediaPipe 核心 -->
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <title>AI 手部距離偵測 (穩定高相容版)</title>
+    <!-- 引入穩定版本的 MediaPipe Hands -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469242/hands.js" crossorigin="anonymous"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align: center; background: #121212; color: #fff; margin: 0; padding: 15px; }
         h1 { font-size: 1.3rem; margin: 10px 0 5px 0; color: #00ffcc; }
+        .canvas-container { position: relative; width: 100%; max-width: 480px; margin: 10px auto; }
         
-        .canvas-container { position: relative; width: 100%; max-width: 480px; margin: 10px auto; background: #000; border-radius: 12px; overflow: hidden; border: 2px solid #00ffcc; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        /* 核心修正：避免使用 display: none 導致手機瀏覽器停止解碼畫面的 Bug */
+        video { position: absolute; top: 0; left: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
         
-        /* 核心修復：位於容器內並維持微小透明度，強制全品牌手機 GPU 解碼影格 */
-        video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0.01; pointer-events: none; z-index: 1; }
-        canvas { position: relative; width: 100%; height: auto; display: block; z-index: 2; }
+        canvas { width: 100%; height: auto; border: 2px solid #00ffcc; border-radius: 12px; background: #000; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
         
         #status { font-size: 0.95rem; font-weight: bold; color: #ffcc00; margin: 5px 0; padding: 10px; background: rgba(255,204,0,0.15); border: 1px solid #ffcc00; border-radius: 8px; word-break: break-all; }
         #status.ready { color: #00ffcc; background: rgba(0,255,204,0.1); border-color: #00ffcc; }
@@ -37,7 +36,7 @@
 <body>
 
     <h1>AI 手部距離偵測</h1>
-    <div id="status">⏳ 正在開啟系統...</div>
+    <div id="status">⏳ 正在載入 AI 引擎模型...</div>
 
     <div class="canvas-container">
         <video id="videoInput" playsinline muted webkit-playsinline></video>
@@ -64,7 +63,9 @@
 
         let currentStream = null;
         let useFacingMode = "user";
+        let isModelReady = false;
         let isProcessing = false;
+        let loopStarted = false;
 
         let isCalibrated = false;
         const CALIBRATE_TARGET_CM = 15.0;
@@ -76,32 +77,42 @@
 
         // 初始化 MediaPipe
         const hands = new Hands({
-            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469242/${file}`
         });
 
         hands.setOptions({
             maxNumHands: 1,
-            modelComplexity: 0, // 使用 Lite 模型確保多機型流暢與高偵測率
+            modelComplexity: 1,
             minDetectionConfidence: 0.5,
             minTrackingConfidence: 0.5
         });
 
         hands.onResults(onResults);
 
-        // 原生相機啟動流程
+        // 監聽模型加載完成
+        hands.initialize().then(() => {
+            isModelReady = true;
+            statusText.innerText = "⚠️ 請先進行校正：將手固定放置於 15 公分處";
+            startCamera();
+        }).catch(err => {
+            statusText.innerText = "❌ AI 模型載入失敗，請確認網路連線並重新整理";
+            console.error(err);
+        });
+
+        // 原生相機啟動邏輯
         async function startCamera() {
             if (currentStream) {
                 currentStream.getTracks().forEach(track => track.stop());
             }
 
-            statusText.innerText = "正在開啟鏡頭...";
+            statusText.innerText = isCalibrated ? "正在切換鏡頭..." : "⚠️ 開啟鏡頭中，請放置手掌於 15cm 處...";
 
             try {
                 const constraints = {
                     video: {
                         facingMode: useFacingMode,
-                        width: { ideal: 640 },
-                        height: { ideal: 480 }
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
                     },
                     audio: false
                 };
@@ -110,23 +121,24 @@
                 video.srcObject = currentStream;
                 await video.play();
 
-                statusText.innerText = isCalibrated ? "🟢 實時測距中" : "⚠️ 請先進行校正：將手固定放置於 15 公分處";
-                requestAnimationFrame(processFrame);
-
+                if (!loopStarted) {
+                    loopStarted = true;
+                    requestAnimationFrame(processFrame);
+                }
             } catch (err) {
-                statusText.innerText = "❌ 無法存取鏡頭，請確認權限設定或切換至 Chrome/Safari 開啟。";
+                statusText.innerText = "❌ 無法存取鏡頭，請確認是否允許存取權限。";
                 console.error(err);
             }
         }
 
-        // 高效影格推送
+        // 原生高效影格處理迴圈
         async function processFrame() {
-            if (video.readyState >= 2 && video.videoWidth > 0 && !isProcessing) {
+            if (video.readyState >= 2 && isModelReady && !isProcessing) {
                 isProcessing = true;
                 try {
                     await hands.send({ image: video });
                 } catch (e) {
-                    console.error("Frame Process Error: ", e);
+                    console.error("Frame processing error:", e);
                 }
                 isProcessing = false;
             }
@@ -134,20 +146,16 @@
         }
 
         function onResults(results) {
-            // 動態同步畫布實體解析度
             canvas.width = video.videoWidth || 640;
             canvas.height = video.videoHeight || 480;
 
             ctx.save();
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-            // 前鏡頭鏡像處理
             if (useFacingMode === "user") {
                 ctx.translate(canvas.width, 0);
                 ctx.scale(-1, 1);
             }
-            
-            // 繪製影像背景
             ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
 
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
@@ -163,7 +171,6 @@
 
                 currentPixelDist = Math.hypot(x2 - x1, y2 - y1);
 
-                // 畫出骨骼連線與關節點
                 ctx.strokeStyle = isCalibrated ? '#00ffcc' : '#ffcc00';
                 ctx.lineWidth = 4;
                 ctx.beginPath();
@@ -177,7 +184,6 @@
                     ctx.fill();
                 }
 
-                // 翻轉座標顯示文字（防止鏡像顛倒）
                 if (useFacingMode === "user") {
                     ctx.translate(canvas.width, 0);
                     ctx.scale(-1, 1);
@@ -215,7 +221,6 @@
             ctx.restore();
         }
 
-        // 校正按鈕
         calibrateBtn.addEventListener('click', () => {
             if (currentPixelDist > 0) {
                 focalLength = (currentPixelDist * CALIBRATE_TARGET_CM) / KNOWN_PALM_WIDTH;
@@ -228,14 +233,13 @@
                 calibrateBtn.style.animation = "none";
                 calibrateBtn.innerText = "🔄 重新校正 (15cm)";
 
-                hintText.innerHTML = "💡 <b>測距進行中</b>：可隨意移動手掌。";
+                hintText.innerHTML = "💡 <b>測距進行中</b>：可隨意移動手掌。若換人使用可點擊重新校正。";
 
             } else {
                 alert("未偵測到手掌！請確定畫面上看到手部紅點後再按確認。");
             }
         });
 
-        // 切換鏡頭
         switchBtn.addEventListener('click', () => {
             useFacingMode = (useFacingMode === "user") ? "environment" : "user";
             isCalibrated = false;
@@ -247,9 +251,6 @@
             
             startCamera();
         });
-
-        // 啟動鏡頭
-        startCamera();
     </script>
 </body>
 </html>
