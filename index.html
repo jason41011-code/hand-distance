@@ -3,18 +3,19 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>AI 手部距離偵測 (POCO/Xiaomi 專用版)</title>
-    <!-- 使用廣泛相容之 MediaPipe 核心 -->
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469242/hands.js" crossorigin="anonymous"></script>
+    <title>AI 手部距離偵測 (雙層硬體加速版)</title>
+    <!-- 引入官方穩定 MediaPipe 核心 -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align: center; background: #121212; color: #fff; margin: 0; padding: 15px; }
         h1 { font-size: 1.3rem; margin: 10px 0 5px 0; color: #00ffcc; }
-        .canvas-container { position: relative; width: 100%; max-width: 480px; margin: 10px auto; }
         
-        /* POCO/HyperOS 專用修正：離屏渲染，避免 GPU 將視訊元素優化裁剪掉 */
-        video { position: fixed; top: 0; left: -9999px; width: 640px; height: 480px; opacity: 0; pointer-events: none; }
+        .canvas-container { position: relative; width: 100%; max-width: 480px; margin: 10px auto; background: #000; border-radius: 12px; overflow: hidden; border: 2px solid #00ffcc; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
         
-        canvas { width: 100%; height: auto; border: 2px solid #00ffcc; border-radius: 12px; background: #000; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        /* 核心修復：位於容器內並維持微小透明度，強制全品牌手機 GPU 解碼影格 */
+        video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0.01; pointer-events: none; z-index: 1; }
+        canvas { position: relative; width: 100%; height: auto; display: block; z-index: 2; }
         
         #status { font-size: 0.95rem; font-weight: bold; color: #ffcc00; margin: 5px 0; padding: 10px; background: rgba(255,204,0,0.15); border: 1px solid #ffcc00; border-radius: 8px; word-break: break-all; }
         #status.ready { color: #00ffcc; background: rgba(0,255,204,0.1); border-color: #00ffcc; }
@@ -31,17 +32,15 @@
         }
 
         .hint { font-size: 0.85rem; color: #aaa; margin-top: 10px; line-height: 1.4; }
-        #debugLog { font-family: monospace; font-size: 0.75rem; color: #888; text-align: left; background: #000; padding: 8px; border-radius: 6px; margin-top: 15px; max-height: 100px; overflow-y: auto; }
     </style>
 </head>
 <body>
 
     <h1>AI 手部距離偵測</h1>
-    <div id="status">⏳ 正在啟動引擎...</div>
+    <div id="status">⏳ 正在開啟系統...</div>
 
     <div class="canvas-container">
-        <!-- 實體寬高屬性防止 Android 視訊解碼停止 -->
-        <video id="videoInput" width="640" height="480" playsinline muted webkit-playsinline></video>
+        <video id="videoInput" playsinline muted webkit-playsinline></video>
         <canvas id="canvasOutput"></canvas>
     </div>
 
@@ -54,8 +53,6 @@
         💡 <b>校正指南</b>：將手掌固定在距離鏡頭 <b>15 公分</b> 處，看到紅點後按下「確認 15cm 校正」。
     </div>
 
-    <div id="debugLog">[System] 初始化中...</div>
-
     <script>
         const video = document.getElementById('videoInput');
         const canvas = document.getElementById('canvasOutput');
@@ -64,18 +61,10 @@
         const switchBtn = document.getElementById('switchBtn');
         const calibrateBtn = document.getElementById('calibrateBtn');
         const hintText = document.getElementById('hintText');
-        const debugLog = document.getElementById('debugLog');
-
-        function log(msg) {
-            console.log(msg);
-            debugLog.innerText = `[${new Date().toLocaleTimeString()}] ${msg}\n` + debugLog.innerText;
-        }
 
         let currentStream = null;
         let useFacingMode = "user";
-        let isModelReady = false;
         let isProcessing = false;
-        let animationFrameId = null;
 
         let isCalibrated = false;
         const CALIBRATE_TARGET_CM = 15.0;
@@ -85,37 +74,27 @@
         let currentPixelDist = 0;
         let smoothDistance = 0;
 
-        // 初始化 MediaPipe Hands
-        log("開始載入 MediaPipe 檔...");
+        // 初始化 MediaPipe
         const hands = new Hands({
-            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469242/${file}`
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
         });
 
         hands.setOptions({
             maxNumHands: 1,
-            modelComplexity: 0, // 使用 Lite 模型，提升 Android 裝置相容度與 FPS
+            modelComplexity: 0, // 使用 Lite 模型確保多機型流暢與高偵測率
             minDetectionConfidence: 0.5,
             minTrackingConfidence: 0.5
         });
 
         hands.onResults(onResults);
 
-        hands.initialize().then(() => {
-            isModelReady = true;
-            log("AI 模型加載完成！");
-            statusText.innerText = "⚠️ 請先進行校正：將手固定放置於 15 公分處";
-            startCamera();
-        }).catch(err => {
-            log("模型錯誤: " + err.message);
-            statusText.innerText = "❌ AI 模型載入失敗，請重新整理網頁";
-        });
-
+        // 原生相機啟動流程
         async function startCamera() {
             if (currentStream) {
                 currentStream.getTracks().forEach(track => track.stop());
             }
 
-            log(`開啟鏡頭: ${useFacingMode}`);
+            statusText.innerText = "正在開啟鏡頭...";
 
             try {
                 const constraints = {
@@ -129,50 +108,46 @@
 
                 currentStream = await navigator.mediaDevices.getUserMedia(constraints);
                 video.srcObject = currentStream;
-                
-                await new Promise((resolve) => {
-                    video.onloadedmetadata = () => {
-                        video.play();
-                        resolve();
-                    };
-                });
+                await video.play();
 
-                log(`相機解析度: ${video.videoWidth}x${video.videoHeight}`);
-
-                if (animationFrameId) cancelAnimationFrame(animationFrameId);
-                processFrame();
+                statusText.innerText = isCalibrated ? "🟢 實時測距中" : "⚠️ 請先進行校正：將手固定放置於 15 公分處";
+                requestAnimationFrame(processFrame);
 
             } catch (err) {
-                log("鏡頭存取失敗: " + err.name);
-                statusText.innerText = "❌ 無法存取鏡頭，請確認權限設定。";
+                statusText.innerText = "❌ 無法存取鏡頭，請確認權限設定或切換至 Chrome/Safari 開啟。";
+                console.error(err);
             }
         }
 
+        // 高效影格推送
         async function processFrame() {
-            // 安全防禦：確保相機已有真實尺寸且 Ready 狀態
-            if (video.readyState >= 2 && video.videoWidth > 0 && isModelReady && !isProcessing) {
+            if (video.readyState >= 2 && video.videoWidth > 0 && !isProcessing) {
                 isProcessing = true;
                 try {
                     await hands.send({ image: video });
                 } catch (e) {
-                    log("處理影格例外: " + e.message);
+                    console.error("Frame Process Error: ", e);
                 }
                 isProcessing = false;
             }
-            animationFrameId = requestAnimationFrame(processFrame);
+            requestAnimationFrame(processFrame);
         }
 
         function onResults(results) {
+            // 動態同步畫布實體解析度
             canvas.width = video.videoWidth || 640;
             canvas.height = video.videoHeight || 480;
 
             ctx.save();
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+            // 前鏡頭鏡像處理
             if (useFacingMode === "user") {
                 ctx.translate(canvas.width, 0);
                 ctx.scale(-1, 1);
             }
+            
+            // 繪製影像背景
             ctx.drawImage(results.image, 0, 0, canvas.width, canvas.height);
 
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
@@ -188,6 +163,7 @@
 
                 currentPixelDist = Math.hypot(x2 - x1, y2 - y1);
 
+                // 畫出骨骼連線與關節點
                 ctx.strokeStyle = isCalibrated ? '#00ffcc' : '#ffcc00';
                 ctx.lineWidth = 4;
                 ctx.beginPath();
@@ -201,6 +177,7 @@
                     ctx.fill();
                 }
 
+                // 翻轉座標顯示文字（防止鏡像顛倒）
                 if (useFacingMode === "user") {
                     ctx.translate(canvas.width, 0);
                     ctx.scale(-1, 1);
@@ -238,6 +215,7 @@
             ctx.restore();
         }
 
+        // 校正按鈕
         calibrateBtn.addEventListener('click', () => {
             if (currentPixelDist > 0) {
                 focalLength = (currentPixelDist * CALIBRATE_TARGET_CM) / KNOWN_PALM_WIDTH;
@@ -257,6 +235,7 @@
             }
         });
 
+        // 切換鏡頭
         switchBtn.addEventListener('click', () => {
             useFacingMode = (useFacingMode === "user") ? "environment" : "user";
             isCalibrated = false;
@@ -268,6 +247,9 @@
             
             startCamera();
         });
+
+        // 啟動鏡頭
+        startCamera();
     </script>
 </body>
 </html>
