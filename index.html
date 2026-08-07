@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <title>AI 手部距離偵測 (強制校正版)</title>
+    <title>AI 手部距離偵測 (多機型相容版)</title>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
     <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
     <style>
@@ -13,11 +13,9 @@
         video { display: none; }
         canvas { width: 100%; height: auto; border: 2px solid #00ffcc; border-radius: 12px; background: #000; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
         
-        /* 狀態列 */
-        #status { font-size: 0.95rem; font-weight: bold; color: #ffcc00; margin: 5px 0; padding: 10px; background: rgba(255,204,0,0.15); border: 1px solid #ffcc00; border-radius: 8px; }
+        #status { font-size: 0.95rem; font-weight: bold; color: #ffcc00; margin: 5px 0; padding: 10px; background: rgba(255,204,0,0.15); border: 1px solid #ffcc00; border-radius: 8px; word-break: break-all; }
         #status.ready { color: #00ffcc; background: rgba(0,255,204,0.1); border-color: #00ffcc; }
 
-        /* 按鈕樣式 */
         .btn-group { display: flex; justify-content: center; gap: 10px; margin-top: 10px; }
         .btn { background: #00ffcc; color: #121212; border: none; padding: 12px 20px; font-size: 1rem; font-weight: bold; border-radius: 25px; cursor: pointer; box-shadow: 0 2px 8px rgba(0,255,204,0.3); -webkit-tap-highlight-color: transparent; }
         .btn-calibrate { background: #ffcc00; box-shadow: 0 2px 8px rgba(255,204,0,0.4); animation: pulse 1.5s infinite; }
@@ -48,9 +46,7 @@
     </div>
 
     <div class="hint" id="hintText">
-        💡 <b>首次開啟指南</b>：<br>
-        1. 用尺量測，將手掌固定放在距離鏡頭 <b>15 公分</b> 處。<br>
-        2. 當畫面上出現手部紅點後，按下上方「<b>確認 15cm 校正</b>」。
+        💡 <b>校正指南</b>：將手掌固定在距離鏡頭 <b>15 公分</b> 處，看到紅點後按下「確認 15cm 校正」。
     </div>
 
     <script>
@@ -65,25 +61,38 @@
         let useFacingMode = "user";
         let cameraHelper = null;
         
-        // 校正狀態管理
-        let isCalibrated = false;      // 預設未校正
-        const CALIBRATE_TARGET_CM = 15.0; // 固定校正基準距離 (15 cm)
-        const KNOWN_PALM_WIDTH = 7.5;    // 平均手掌骨骼寬度 (cm)
-        let focalLength = 500;           // 鏡頭焦距 (校正後算出)
+        let isCalibrated = false;
+        const CALIBRATE_TARGET_CM = 15.0;
+        const KNOWN_PALM_WIDTH = 7.5;
+        let focalLength = 500;
         
-        let currentPixelDist = 0;        // 當前抓取到的像素距離
-        let smoothDistance = 0;          // 平滑濾波距離
+        let currentPixelDist = 0;
+        let smoothDistance = 0;
 
-        // 初始化 MediaPipe
+        // 檢查 WebGL 支援
+        function isWebGLAvailable() {
+            try {
+                const canvas = document.createElement('canvas');
+                return !!(window.WebGLRenderingContext && (canvas.getContext('webgl') || canvas.getContext('experimental-webgl')));
+            } catch (e) {
+                return false;
+            }
+        }
+
+        if (!isWebGLAvailable()) {
+            statusText.innerText = "❌ 您的瀏覽器不支援 WebGL，請改用 Chrome 或 Safari 開啟！";
+        }
+
         const hands = new Hands({
             locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
         });
 
+        // 調整相容性設定：降低門檻至 0.5，提升低畫質鏡頭抓取率
         hands.setOptions({
             maxNumHands: 1,
-            modelComplexity: 1,
-            minDetectionConfidence: 0.6,
-            minTrackingConfidence: 0.6
+            modelComplexity: 0, // 改為 0 (Lite 模型)，大幅降低硬體需求並提高偵測成功率
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
         });
 
         hands.onResults(onResults);
@@ -91,21 +100,23 @@
         function startCamera() {
             if (cameraHelper) cameraHelper.stop();
 
+            // 彈性硬體設定：使用 ideal 避開固定解析度導致死鎖問題
             cameraHelper = new Camera(video, {
                 onFrame: async () => { await hands.send({ image: video }); },
                 facingMode: useFacingMode,
-                width: 720,
-                height: 1280
+                width: { ideal: 640 },
+                height: { ideal: 480 }
             });
 
             cameraHelper.start().catch(err => {
-                statusText.innerText = "❌ 無法存取鏡頭，請確認權限設定。";
+                statusText.innerText = "❌ 無法開啟鏡頭，請確認權限或嘗試改用外置 Chrome 開啟。";
+                console.error(err);
             });
         }
 
         function onResults(results) {
-            canvas.width = video.videoWidth || 720;
-            canvas.height = video.videoHeight || 1280;
+            canvas.width = video.videoWidth || 640;
+            canvas.height = video.videoHeight || 480;
 
             ctx.save();
             ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -119,18 +130,16 @@
             if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
                 const landmarks = results.multiHandLandmarks[0];
 
-                const p5 = landmarks[5];   // 食指根部
-                const p17 = landmarks[17]; // 小指根部
+                const p5 = landmarks[5];
+                const p17 = landmarks[17];
 
                 const x1 = p5.x * canvas.width;
                 const y1 = p5.y * canvas.height;
                 const x2 = p17.x * canvas.width;
                 const y2 = p17.y * canvas.height;
 
-                // 兩點即時像素距離
                 currentPixelDist = Math.hypot(x2 - x1, y2 - y1);
 
-                // 畫出骨骼連線與關鍵點
                 ctx.strokeStyle = isCalibrated ? '#00ffcc' : '#ffcc00';
                 ctx.lineWidth = 4;
                 ctx.beginPath();
@@ -144,7 +153,6 @@
                     ctx.fill();
                 }
 
-                // 繪製文字 (防止鏡像文字顛倒)
                 if (useFacingMode === "user") {
                     ctx.translate(canvas.width, 0);
                     ctx.scale(-1, 1);
@@ -153,12 +161,10 @@
                 const textX = (useFacingMode === "user") ? (canvas.width - x1) : x1;
 
                 if (!isCalibrated) {
-                    // === 1. 未校正狀態 ===
                     ctx.fillStyle = '#ffcc00';
                     ctx.font = 'bold 24px sans-serif';
                     ctx.fillText("請維持 15cm 並按校正", textX, Math.max(y1 - 20, 40));
                 } else {
-                    // === 2. 已校正狀態（開始即時測距）===
                     const rawDistance = (KNOWN_PALM_WIDTH * focalLength) / currentPixelDist;
 
                     if (smoothDistance === 0) smoothDistance = rawDistance;
@@ -175,25 +181,20 @@
                 currentPixelDist = 0;
                 smoothDistance = 0;
                 if (!isCalibrated) {
-                    statusText.innerText = "⚠️ 請將手掌放至 15cm 處面向鏡頭...";
+                    statusText.innerText = "⚠️ 搜尋手掌中...請保持手掌面向鏡頭";
                 } else {
-                    statusText.innerText = "🔍 尋找手掌中...";
+                    statusText.innerText = "🔍 搜尋手掌中...";
                 }
             }
 
             ctx.restore();
         }
 
-        // 按鈕邏輯：進行 15cm 校正
         calibrateBtn.addEventListener('click', () => {
             if (currentPixelDist > 0) {
-                // 1. 依據 15cm 反推相機焦距
                 focalLength = (currentPixelDist * CALIBRATE_TARGET_CM) / KNOWN_PALM_WIDTH;
-                
-                // 2. 切換至已校正狀態
                 isCalibrated = true;
 
-                // 3. 更新 UI 樣式與說明
                 statusText.className = "ready";
                 statusText.innerText = "✅ 校正完成！開始實時測距";
                 
@@ -201,19 +202,17 @@
                 calibrateBtn.style.animation = "none";
                 calibrateBtn.innerText = "🔄 重新校正 (15cm)";
 
-                hintText.innerHTML = "💡 <b>測距進行中</b>：現在你可以隨意移動手掌，系統將即時計算距離。若換人使用或更換環境，可點擊「重新校正」。";
+                hintText.innerHTML = "💡 <b>測距進行中</b>：可隨意移動手掌。若換人使用可重新校正。";
 
             } else {
-                alert("未偵測到手掌！請先將手掌面對鏡頭，確定看到紅點後再按確認。");
+                alert("未偵測到手掌！請確定畫面上看到手部紅點後再按確認。");
             }
         });
 
-        // 切換鏡頭時重置校正（因為前後鏡頭焦距不同）
         switchBtn.addEventListener('click', () => {
             useFacingMode = (useFacingMode === "user") ? "environment" : "user";
             isCalibrated = false;
             
-            // 重設 UI
             statusText.className = "";
             statusText.innerText = "⚠️ 切換鏡頭，請重新進行 15cm 校正";
             calibrateBtn.classList.add("btn-calibrate");
